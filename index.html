@@ -377,6 +377,7 @@ let waveshaper, masterGain, compressor, convolver, toneFilter;
 let noiseSource, noiseBuf, noiseGain;
 let breathNoise, breathGain, breathFilter;
 let phlegmDelay1, phlegmDelay2, phlegmLFO1, phlegmLFO2, phlegmFeedback, phlegmGain, phlegmFilter, phlegmLFOGain1, phlegmLFOGain2;
+let formantMerge, preMaster, dryGain, reverbGain;
 
 function createNoiseBuffer(ctx, duration) {
   const len = ctx.sampleRate * duration;
@@ -484,7 +485,7 @@ function initAudio() {
   const formantQs =    [12,  10,   8,    7,    6   ];
   const formantGains = [1.0, 0.7,  0.45, 0.3,  0.15];
 
-  const formantMerge = actx.createGain();
+  formantMerge = actx.createGain();
   formantMerge.gain.value = 1.0;
 
   formants = formantFreqs.map((f, i) => {
@@ -595,9 +596,9 @@ function initAudio() {
   // === THROAT REVERB ===
   convolver = actx.createConvolver();
   convolver.buffer = createThroatIR(actx);
-  const reverbGain = actx.createGain();
+  reverbGain = actx.createGain();
   reverbGain.gain.value = 0.35;
-  const dryGain = actx.createGain();
+  dryGain = actx.createGain();
   dryGain.gain.value = 0.75;
 
   // === MASTER ===
@@ -650,7 +651,7 @@ function initAudio() {
   pitchLFOGain.connect(subOsc.frequency);
 
   // Merge → dry/wet reverb → compressor → master
-  const preMaster = actx.createGain();
+  preMaster = actx.createGain();
   preMaster.gain.value = 1;
 
   // Feed formants into phlegm effect AND direct to preMaster
@@ -721,14 +722,9 @@ function updateAudio(t) {
   subOsc.frequency.setTargetAtTime(finalPitch * 0.5, now, 0.03);
 
   // === GLOTTAL GAINS ===
-  // Use setValueAtTime for reliability on iOS (setTargetAtTime can be unreliable
-  // when rAF is throttled during touch interactions)
-  glottalGain.gain.cancelScheduledValues(now);
-  glottalGain.gain.setValueAtTime(currentGlottalGain, now);
-  subGain.gain.cancelScheduledValues(now);
-  subGain.gain.setValueAtTime(currentGlottalGain * 0.25, now);
-  noiseGain.gain.cancelScheduledValues(now);
-  noiseGain.gain.setValueAtTime(currentGlottalGain * 0.12, now);
+  glottalGain.gain.setTargetAtTime(currentGlottalGain, now, 0.02);
+  subGain.gain.setTargetAtTime(currentGlottalGain * 0.25, now, 0.02);
+  noiseGain.gain.setTargetAtTime(currentGlottalGain * 0.12, now, 0.02);
 
   // Breath noise scales with velocity (faster swing = more breath)
   const breathAmt = Math.min(Math.abs(vel) * 2, 0.3) * currentGlottalGain;
