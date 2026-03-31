@@ -427,6 +427,13 @@ function makeDistortionCurve(amount) {
 
 function initAudio() {
   if (audioStarted) return;
+  // Force iOS audio session to "playback" so sound works even with mute switch on.
+  // A silent <audio> element played from a user gesture flips the session category.
+  try {
+    const silentDataUri = 'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAABhgFBkBUAAAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAABhgFBkBUAAAAAAAAAAAAAAAAA';
+    const a = new Audio(silentDataUri);
+    a.play().then(() => { dbgMsg('silent <audio> played — iOS playback mode'); }).catch(()=>{});
+  } catch(e) {}
   actx = new (window.AudioContext || window.webkitAudioContext)();
   audioStarted = true;
 
