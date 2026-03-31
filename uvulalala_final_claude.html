@@ -696,9 +696,15 @@ function updateAudio(t) {
   const shouldSound = dragging || Math.abs(vel) > 0.02;
   if(_dbgAudioFrame++ % 60 === 0) dbgMsg(`audio: drag=${dragging} vel=${vel.toFixed(3)} gain=${currentGlottalGain.toFixed(3)} state=${actx.state} master=${masterGain?masterGain.gain.value.toFixed(3):'?'}`);
 
-  // Smooth gain envelope
+  // Smooth gain envelope — on mobile, kick-start with an immediate bump
+  // so setTargetAtTime doesn't ramp from near-zero too slowly
   targetGlottalGain = shouldSound ? 0.35 : 0;
+  if (shouldSound && !prevDragging && currentGlottalGain < 0.01) {
+    currentGlottalGain = 0.15; // immediate audible kick
+    dbgMsg('gain kick-start to 0.15');
+  }
   currentGlottalGain += (targetGlottalGain - currentGlottalGain) * 0.08;
+  prevDragging = dragging;
 
   const now = actx.currentTime;
 
@@ -715,9 +721,14 @@ function updateAudio(t) {
   subOsc.frequency.setTargetAtTime(finalPitch * 0.5, now, 0.03);
 
   // === GLOTTAL GAINS ===
-  glottalGain.gain.setTargetAtTime(currentGlottalGain, now, 0.02);
-  subGain.gain.setTargetAtTime(currentGlottalGain * 0.25, now, 0.02);
-  noiseGain.gain.setTargetAtTime(currentGlottalGain * 0.12, now, 0.02);
+  // Use setValueAtTime for reliability on iOS (setTargetAtTime can be unreliable
+  // when rAF is throttled during touch interactions)
+  glottalGain.gain.cancelScheduledValues(now);
+  glottalGain.gain.setValueAtTime(currentGlottalGain, now);
+  subGain.gain.cancelScheduledValues(now);
+  subGain.gain.setValueAtTime(currentGlottalGain * 0.25, now);
+  noiseGain.gain.cancelScheduledValues(now);
+  noiseGain.gain.setValueAtTime(currentGlottalGain * 0.12, now);
 
   // Breath noise scales with velocity (faster swing = more breath)
   const breathAmt = Math.min(Math.abs(vel) * 2, 0.3) * currentGlottalGain;
