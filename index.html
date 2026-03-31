@@ -297,7 +297,7 @@ function hideDragHint(){if(dragHintEl&&!dragHintEl.classList.contains('hidden'))
 viewport.addEventListener('mousedown',e=>{if(e.target.closest('.punch-btn'))return;dragging=true;hideDragHint();mapPointer(e.clientX,e.clientY);viewport.style.cursor='grabbing';});
 window.addEventListener('mousemove',e=>{if(!dragging)return;mapPointer(e.clientX,e.clientY);});
 window.addEventListener('mouseup',()=>{dragging=false;viewport.style.cursor='grab';});
-viewport.addEventListener('touchstart',e=>{if(e.target.closest('.punch-btn'))return;e.preventDefault();initAudio();if(actx&&actx.state==='suspended')actx.resume();dragging=true;hideDragHint();mapPointer(e.touches[0].clientX,e.touches[0].clientY);},{passive:false});
+viewport.addEventListener('touchstart',e=>{if(e.target.closest('.punch-btn'))return;e.preventDefault();dbgMsg('viewport touchstart');initAudio();if(actx&&actx.state==='suspended'){actx.resume();dbgMsg('viewport resume called');}dbgMsg('after viewport init: '+dbgState());dragging=true;hideDragHint();mapPointer(e.touches[0].clientX,e.touches[0].clientY);},{passive:false});
 window.addEventListener('touchmove',e=>{if(!dragging)return;e.preventDefault();mapPointer(e.touches[0].clientX,e.touches[0].clientY);},{passive:false});
 window.addEventListener('touchend',()=>{dragging=false;});
 document.getElementById('punchBtn').addEventListener('click',()=>{vel+=(Math.random()-0.5)*2.5;});
@@ -681,11 +681,13 @@ let audioActive = false;
 let targetGlottalGain = 0;
 let currentGlottalGain = 0;
 
+let _dbgAudioFrame = 0;
 function updateAudio(t) {
-  if (!audioStarted || !actx) return;
+  if (!audioStarted || !actx) { if(_dbgAudioFrame++ % 120 === 0) dbgMsg('updateAudio skip: started='+audioStarted+' actx='+(!!actx)); return; }
 
   // Voice is active when dragging or recently punched
   const shouldSound = dragging || Math.abs(vel) > 0.02;
+  if(_dbgAudioFrame++ % 60 === 0) dbgMsg(`audio: drag=${dragging} vel=${vel.toFixed(3)} gain=${currentGlottalGain.toFixed(3)} state=${actx.state} master=${masterGain?masterGain.gain.value.toFixed(3):'?'}`);
 
   // Smooth gain envelope
   targetGlottalGain = shouldSound ? 0.35 : 0;
@@ -858,13 +860,26 @@ function glottalStop() {
   }, 600);
 }
 
+// === DEBUG OVERLAY ===
+const dbg = document.createElement('div');
+dbg.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:rgba(0,0,0,0.85);color:#0f0;font:12px/1.4 monospace;padding:8px;pointer-events:none;white-space:pre-wrap;max-height:40vh;overflow-y:auto;';
+document.body.appendChild(dbg);
+const dbgLog = [];
+function dbgMsg(msg) { dbgLog.push(msg); if(dbgLog.length>20) dbgLog.shift(); dbg.textContent = dbgLog.join('\n'); }
+function dbgState() { return actx ? `actx.state=${actx.state} sr=${actx.sampleRate}` : 'actx=null'; }
+window.addEventListener('error', e => dbgMsg('ERR: ' + e.message));
+
 // Wire up audio start on first interaction — must resume() on every gesture
 // because mobile browsers suspend AudioContext aggressively.
 // Use non-passive touchstart so resume() stays in the gesture call stack (iOS requirement).
-function unlockAudio() {
+function unlockAudio(e) {
+  dbgMsg(`unlockAudio via ${e.type} | audioStarted=${audioStarted} | ${dbgState()}`);
   initAudio();
+  dbgMsg(`after initAudio: ${dbgState()}`);
   if (actx && actx.state === 'suspended') {
-    actx.resume();
+    const p = actx.resume();
+    dbgMsg('resume() called');
+    if (p && p.then) p.then(() => dbgMsg('resume resolved: ' + actx.state)).catch(err => dbgMsg('resume rejected: ' + err));
   }
   if (actx && actx.state === 'running') {
     document.getElementById('hintText').style.opacity = '0';
