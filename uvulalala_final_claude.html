@@ -428,13 +428,6 @@ function makeDistortionCurve(amount) {
 
 function initAudio() {
   if (audioStarted) return;
-  // Force iOS audio session to "playback" so sound works even with mute switch on.
-  // A silent <audio> element played from a user gesture flips the session category.
-  try {
-    const silentDataUri = 'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAABhgFBkBUAAAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAABhgFBkBUAAAAAAAAAAAAAAAAA';
-    const a = new Audio(silentDataUri);
-    a.play().then(() => { dbgMsg('silent <audio> played — iOS playback mode'); }).catch(()=>{});
-  } catch(e) {}
   actx = new (window.AudioContext || window.webkitAudioContext)();
   audioStarted = true;
 
@@ -882,59 +875,59 @@ function dbgMsg(msg) { dbgLog.push(msg); if(dbgLog.length>20) dbgLog.shift(); db
 function dbgState() { return actx ? `actx.state=${actx.state} sr=${actx.sampleRate}` : 'actx=null'; }
 window.addEventListener('error', e => dbgMsg('ERR: ' + e.message));
 
-// === TEST TONE: bypasses entire chain, goes straight to speakers ===
-let testOsc = null, testGain = null;
-function startTestTone() {
-  if (!actx) return;
-  if (testOsc) return; // already running
-  testOsc = actx.createOscillator();
-  testOsc.type = 'sine';
-  testOsc.frequency.value = 440;
-  testGain = actx.createGain();
-  testGain.gain.value = 0.3;
-  testOsc.connect(testGain);
-  testGain.connect(actx.destination);
-  testOsc.start();
-  dbgMsg('TEST TONE started: 440Hz sine → destination');
-}
-function stopTestTone() {
-  if (testOsc) {
-    testOsc.stop();
-    testOsc.disconnect();
-    testOsc = null;
-    testGain = null;
-    dbgMsg('TEST TONE stopped');
-  }
-}
+// === MINIMAL iOS AUDIO TEST ===
+// Everything happens in a single touchstart — no prior AudioContext, no tricks.
+// This is the most basic possible Web Audio test on iOS.
+let testCtx = null, testRunning = false;
 
-// Wire up audio start on first interaction
-function unlockAudio(e) {
-  dbgMsg(`unlock ${e.type} | ${dbgState()}`);
-  initAudio();
-  if (actx && actx.state === 'suspended') {
-    actx.resume();
+document.addEventListener('touchstart', function(e) {
+  // Create a FRESH AudioContext on every touch if needed
+  if (!testCtx || testCtx.state === 'closed') {
+    testCtx = new (window.AudioContext || window.webkitAudioContext)();
   }
+  if (testCtx.state === 'suspended') {
+    testCtx.resume();
+  }
+
+  dbgMsg(`TOUCH t=${testCtx.currentTime.toFixed(2)} state=${testCtx.state}`);
+
+  // Log currentTime over the next second to see if it advances
+  const t0 = testCtx.currentTime;
+  setTimeout(() => {
+    dbgMsg(`+100ms t=${testCtx.currentTime.toFixed(2)} (was ${t0.toFixed(2)}) state=${testCtx.state}`);
+  }, 100);
+  setTimeout(() => {
+    dbgMsg(`+500ms t=${testCtx.currentTime.toFixed(2)} state=${testCtx.state}`);
+  }, 500);
+
+  // Play a simple beep
+  if (!testRunning) {
+    const o = testCtx.createOscillator();
+    o.frequency.value = 440;
+    const g = testCtx.createGain();
+    g.gain.value = 0.5;
+    o.connect(g);
+    g.connect(testCtx.destination);
+    o.start();
+    o.stop(testCtx.currentTime + 1);
+    testRunning = true;
+    setTimeout(() => { testRunning = false; }, 1100);
+    dbgMsg(`BEEP started at t=${testCtx.currentTime.toFixed(2)} → ${(testCtx.currentTime+1).toFixed(2)}`);
+  }
+}, { passive: false });
+
+// Also init the main audio chain on touch
+function unlockAudio(e) {
+  initAudio();
+  if (actx && actx.state === 'suspended') actx.resume();
   if (actx && actx.state === 'running') {
     document.getElementById('hintText').style.opacity = '0';
   }
 }
-document.addEventListener('touchstart', unlockAudio, { passive: false, once: false });
-document.addEventListener('mousedown', unlockAudio, { once: false });
+document.addEventListener('touchstart', unlockAudio, { passive: false });
+document.addEventListener('mousedown', unlockAudio);
 
-// TEST: play tone while dragging on viewport — bypasses all audio chain
-viewport.addEventListener('touchstart', function testHandler(e) {
-  if(e.target.closest('.punch-btn')) return;
-  initAudio();
-  if(actx && actx.state==='suspended') actx.resume();
-  startTestTone();
-  dbgMsg('TOUCH START — test tone ON, actx.state=' + actx.state);
-}, { passive: false, capture: true });
-window.addEventListener('touchend', function() {
-  stopTestTone();
-  dbgMsg('TOUCH END — test tone OFF');
-}, { capture: true });
-
-// Patch punch button to also trigger glottal stop
+// Patch punch button
 const punchBtn = document.getElementById('punchBtn');
 punchBtn.addEventListener('click', glottalStop);
 punchBtn.addEventListener('touchstart', (e) => { e.stopPropagation(); initAudio(); if(actx&&actx.state==='suspended')actx.resume(); glottalStop(); }, { passive: false });
