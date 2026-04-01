@@ -882,25 +882,57 @@ function dbgMsg(msg) { dbgLog.push(msg); if(dbgLog.length>20) dbgLog.shift(); db
 function dbgState() { return actx ? `actx.state=${actx.state} sr=${actx.sampleRate}` : 'actx=null'; }
 window.addEventListener('error', e => dbgMsg('ERR: ' + e.message));
 
-// Wire up audio start on first interaction — must resume() on every gesture
-// because mobile browsers suspend AudioContext aggressively.
-// Use non-passive touchstart so resume() stays in the gesture call stack (iOS requirement).
+// === TEST TONE: bypasses entire chain, goes straight to speakers ===
+let testOsc = null, testGain = null;
+function startTestTone() {
+  if (!actx) return;
+  if (testOsc) return; // already running
+  testOsc = actx.createOscillator();
+  testOsc.type = 'sine';
+  testOsc.frequency.value = 440;
+  testGain = actx.createGain();
+  testGain.gain.value = 0.3;
+  testOsc.connect(testGain);
+  testGain.connect(actx.destination);
+  testOsc.start();
+  dbgMsg('TEST TONE started: 440Hz sine → destination');
+}
+function stopTestTone() {
+  if (testOsc) {
+    testOsc.stop();
+    testOsc.disconnect();
+    testOsc = null;
+    testGain = null;
+    dbgMsg('TEST TONE stopped');
+  }
+}
+
+// Wire up audio start on first interaction
 function unlockAudio(e) {
-  dbgMsg(`unlockAudio via ${e.type} | audioStarted=${audioStarted} | ${dbgState()}`);
+  dbgMsg(`unlock ${e.type} | ${dbgState()}`);
   initAudio();
-  dbgMsg(`after initAudio: ${dbgState()}`);
   if (actx && actx.state === 'suspended') {
-    const p = actx.resume();
-    dbgMsg('resume() called');
-    if (p && p.then) p.then(() => dbgMsg('resume resolved: ' + actx.state)).catch(err => dbgMsg('resume rejected: ' + err));
+    actx.resume();
   }
   if (actx && actx.state === 'running') {
     document.getElementById('hintText').style.opacity = '0';
   }
 }
-document.addEventListener('mousedown', unlockAudio, { once: false });
 document.addEventListener('touchstart', unlockAudio, { passive: false, once: false });
-document.addEventListener('touchend', unlockAudio, { once: false });
+document.addEventListener('mousedown', unlockAudio, { once: false });
+
+// TEST: play tone while dragging on viewport — bypasses all audio chain
+viewport.addEventListener('touchstart', function testHandler(e) {
+  if(e.target.closest('.punch-btn')) return;
+  initAudio();
+  if(actx && actx.state==='suspended') actx.resume();
+  startTestTone();
+  dbgMsg('TOUCH START — test tone ON, actx.state=' + actx.state);
+}, { passive: false, capture: true });
+window.addEventListener('touchend', function() {
+  stopTestTone();
+  dbgMsg('TOUCH END — test tone OFF');
+}, { capture: true });
 
 // Patch punch button to also trigger glottal stop
 const punchBtn = document.getElementById('punchBtn');
