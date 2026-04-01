@@ -293,14 +293,15 @@ function mapPointer(px, py) {
   uf(document.getElementById('pLength'), 60, 250);
 }
 const dragHintEl=document.getElementById('dragHint');
+const hintText=document.getElementById('hintText');
 function hideDragHint(){if(dragHintEl&&!dragHintEl.classList.contains('hidden')){dragHintEl.classList.add('hidden');setTimeout(()=>{dragHintEl.remove();},500);}}
-viewport.addEventListener('mousedown',e=>{if(e.target.closest('.punch-btn'))return;dragging=true;hideDragHint();mapPointer(e.clientX,e.clientY);viewport.style.cursor='grabbing';});
+function primeAudioFromGesture(){void ensureAudioReady();}
+viewport.addEventListener('mousedown',e=>{if(e.target.closest('.punch-btn'))return;primeAudioFromGesture();dragging=true;hideDragHint();mapPointer(e.clientX,e.clientY);viewport.style.cursor='grabbing';});
 window.addEventListener('mousemove',e=>{if(!dragging)return;mapPointer(e.clientX,e.clientY);});
 window.addEventListener('mouseup',()=>{dragging=false;viewport.style.cursor='grab';});
-viewport.addEventListener('touchstart',e=>{if(e.target.closest('.punch-btn'))return;e.preventDefault();dbgMsg('viewport touchstart');initAudio();if(actx&&actx.state==='suspended'){actx.resume();dbgMsg('viewport resume called');}dbgMsg('after viewport init: '+dbgState());dragging=true;hideDragHint();mapPointer(e.touches[0].clientX,e.touches[0].clientY);},{passive:false});
+viewport.addEventListener('touchstart',e=>{if(e.target.closest('.punch-btn'))return;primeAudioFromGesture();e.preventDefault();dragging=true;hideDragHint();mapPointer(e.touches[0].clientX,e.touches[0].clientY);},{passive:false});
 window.addEventListener('touchmove',e=>{if(!dragging)return;e.preventDefault();mapPointer(e.touches[0].clientX,e.touches[0].clientY);},{passive:false});
 window.addEventListener('touchend',()=>{dragging=false;});
-document.getElementById('punchBtn').addEventListener('click',()=>{vel+=(Math.random()-0.5)*2.5;});
 
 
 // ========== UVULA IMAGE ==========
@@ -366,7 +367,8 @@ function drawUvula(t, cx, uvulaTopY, uvulaLen, uvulaW, swingX) {
 }
 
 // ========== WEB AUDIO THROAT SYNTH ==========
-let actx = null, audioStarted = false;
+const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+let actx = null, audioStarted = false, audioPrimed = false, audioUnlockPromise = null;
 
 // Audio nodes
 let glottalOsc, glottalGain, subOsc, subGain;
@@ -378,6 +380,8 @@ let noiseSource, noiseBuf, noiseGain;
 let breathNoise, breathGain, breathFilter;
 let phlegmDelay1, phlegmDelay2, phlegmLFO1, phlegmLFO2, phlegmFeedback, phlegmGain, phlegmFilter, phlegmLFOGain1, phlegmLFOGain2;
 let formantMerge, preMaster, dryGain, reverbGain;
+const distortionCurveCache = new Map();
+let lastDistortionAmount = null;
 
 function createNoiseBuffer(ctx, duration) {
   const len = ctx.sampleRate * duration;
@@ -426,9 +430,64 @@ function makeDistortionCurve(amount) {
   return curve;
 }
 
+function getDistortionCurve(amount) {
+  const key = Math.round(amount * 20) / 20;
+  if (!distortionCurveCache.has(key)) {
+    distortionCurveCache.set(key, makeDistortionCurve(key));
+  }
+  return distortionCurveCache.get(key);
+}
+
+async function ensureAudioReady() {
+  if (audioUnlockPromise) return audioUnlockPromise;
+
+  audioUnlockPromise = (async () => {
+    initAudio();
+    if (!actx) return false;
+
+    if (actx.state !== 'running') {
+      try {
+        await actx.resume();
+      } catch (err) {
+        return false;
+      }
+    }
+
+    if (!audioPrimed) {
+      const unlockSource = actx.createBufferSource();
+      const unlockBuffer = actx.createBuffer(1, 1, actx.sampleRate);
+      const unlockGain = actx.createGain();
+      unlockSource.buffer = unlockBuffer;
+      unlockGain.gain.value = 0.00001;
+      unlockSource.connect(unlockGain);
+      unlockGain.connect(actx.destination);
+      unlockSource.start();
+      unlockSource.stop(actx.currentTime + 0.001);
+      audioPrimed = true;
+    }
+
+    if (actx.state === 'running') {
+      hintText.textContent =
+        'tap or drag uvula to play • sliders shape the voice • punch for glottal stop';
+    }
+
+    return actx.state === 'running';
+  })();
+
+  try {
+    return await audioUnlockPromise;
+  } finally {
+    audioUnlockPromise = null;
+  }
+}
+
 function initAudio() {
-  if (audioStarted) return;
-  actx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioStarted || !AudioContextCtor) return;
+  try {
+    actx = new AudioContextCtor({ latencyHint: 'interactive' });
+  } catch (err) {
+    actx = new AudioContextCtor();
+  }
   audioStarted = true;
 
   // === GLOTTAL SOURCE: sawtooth-ish oscillator (vocal fold buzz) ===
@@ -469,7 +528,7 @@ function initAudio() {
 
   // === WAVESHAPER: subharmonic generation ===
   waveshaper = actx.createWaveShaper();
-  waveshaper.curve = makeDistortionCurve(3);
+  waveshaper.curve = getDistortionCurve(3);
   waveshaper.oversample = '4x';
 
   // === FORMANT FILTER BANK ===
@@ -672,8 +731,8 @@ function initAudio() {
   tremoloLFO.start();
   pitchLFO.start();
 
-  document.getElementById('hintText').textContent =
-    'drag uvula to play \u2022 sliders shape the voice \u2022 punch for glottal stop';
+  hintText.textContent =
+    'tap or drag uvula to play \u2022 sliders shape the voice \u2022 punch for glottal stop';
 }
 
 // Update audio params from visual state each frame
@@ -682,7 +741,6 @@ let audioActive = false;
 let targetGlottalGain = 0;
 let currentGlottalGain = 0;
 
-let _dbgAudioFrame = 0;
 let glottalStopActive = false; // true while glottalStop owns gain scheduling
 
 // Helper: set an AudioParam's value directly without accumulating automation events.
@@ -694,16 +752,15 @@ function setParam(param, val) {
 
 function updateAudio(t) {
   if (!audioStarted || !actx) return;
+  if (actx.state !== 'running') return;
 
   // Voice is active when dragging or recently punched
   const shouldSound = dragging || Math.abs(vel) > 0.02;
-  if(_dbgAudioFrame++ % 60 === 0) dbgMsg(`audio: drag=${dragging} vel=${vel.toFixed(3)} gain=${currentGlottalGain.toFixed(3)} state=${actx.state} gsActive=${glottalStopActive}`);
 
   // Smooth gain envelope
   targetGlottalGain = shouldSound ? 0.35 : 0;
   if (shouldSound && !prevDragging && currentGlottalGain < 0.01) {
     currentGlottalGain = 0.15;
-    dbgMsg('gain kick-start to 0.15');
   }
   currentGlottalGain += (targetGlottalGain - currentGlottalGain) * 0.08;
   prevDragging = dragging;
@@ -732,7 +789,11 @@ function updateAudio(t) {
 
   // === STIFFNESS → harmonic richness ===
   const stiffNorm = P.stiffness / 100;
-  waveshaper.curve = makeDistortionCurve(1 + stiffNorm * 8);
+  const distortionAmount = 1 + stiffNorm * 8;
+  if (distortionAmount !== lastDistortionAmount) {
+    waveshaper.curve = getDistortionCurve(distortionAmount);
+    lastDistortionAmount = distortionAmount;
+  }
 
   // === WIDTH → formant vowel shape ===
   const widthNorm = (P.width) / 100;
@@ -775,9 +836,9 @@ function updateAudio(t) {
 }
 
 // Glottal stop (punch button) — violent impact that rings out
-function glottalStop() {
-  if (!audioStarted || !actx) return;
-  initAudio();
+async function glottalStop() {
+  const ready = await ensureAudioReady();
+  if (!ready || !audioStarted || !actx) return;
   glottalStopActive = true;
   const now = actx.currentTime;
 
@@ -859,78 +920,45 @@ function glottalStop() {
   // --- PHASE 4: Recovery (400ms+) ---
   setTimeout(() => {
     if (!actx) return;
-    const t2 = actx.currentTime;
     // Hand control back to updateAudio loop
     glottalStopActive = false;
-    dbgMsg('glottalStop recovery — handing back to updateAudio');
   }, 600);
 }
 
-// === DEBUG OVERLAY ===
-const dbg = document.createElement('div');
-dbg.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:rgba(0,0,0,0.85);color:#0f0;font:12px/1.4 monospace;padding:8px;pointer-events:none;white-space:pre-wrap;max-height:40vh;overflow-y:auto;';
-document.body.appendChild(dbg);
-const dbgLog = [];
-function dbgMsg(msg) { dbgLog.push(msg); if(dbgLog.length>20) dbgLog.shift(); dbg.textContent = dbgLog.join('\n'); }
-function dbgState() { return actx ? `actx.state=${actx.state} sr=${actx.sampleRate}` : 'actx=null'; }
-window.addEventListener('error', e => dbgMsg('ERR: ' + e.message));
-
-// === MINIMAL iOS AUDIO TEST ===
-// Everything happens in a single touchstart — no prior AudioContext, no tricks.
-// This is the most basic possible Web Audio test on iOS.
-let testCtx = null, testRunning = false;
-
-document.addEventListener('touchstart', function(e) {
-  // Create a FRESH AudioContext on every touch if needed
-  if (!testCtx || testCtx.state === 'closed') {
-    testCtx = new (window.AudioContext || window.webkitAudioContext)();
-  }
-  if (testCtx.state === 'suspended') {
-    testCtx.resume();
-  }
-
-  dbgMsg(`TOUCH t=${testCtx.currentTime.toFixed(2)} state=${testCtx.state}`);
-
-  // Log currentTime over the next second to see if it advances
-  const t0 = testCtx.currentTime;
-  setTimeout(() => {
-    dbgMsg(`+100ms t=${testCtx.currentTime.toFixed(2)} (was ${t0.toFixed(2)}) state=${testCtx.state}`);
-  }, 100);
-  setTimeout(() => {
-    dbgMsg(`+500ms t=${testCtx.currentTime.toFixed(2)} state=${testCtx.state}`);
-  }, 500);
-
-  // Play a simple beep
-  if (!testRunning) {
-    const o = testCtx.createOscillator();
-    o.frequency.value = 440;
-    const g = testCtx.createGain();
-    g.gain.value = 0.5;
-    o.connect(g);
-    g.connect(testCtx.destination);
-    o.start();
-    o.stop(testCtx.currentTime + 1);
-    testRunning = true;
-    setTimeout(() => { testRunning = false; }, 1100);
-    dbgMsg(`BEEP started at t=${testCtx.currentTime.toFixed(2)} → ${(testCtx.currentTime+1).toFixed(2)}`);
-  }
-}, { passive: false });
-
-// Also init the main audio chain on touch
-function unlockAudio(e) {
-  initAudio();
-  if (actx && actx.state === 'suspended') actx.resume();
-  if (actx && actx.state === 'running') {
-    document.getElementById('hintText').style.opacity = '0';
-  }
+function unlockAudio() {
+  primeAudioFromGesture();
 }
-document.addEventListener('touchstart', unlockAudio, { passive: false });
+document.addEventListener('touchstart', unlockAudio, { passive: true });
 document.addEventListener('mousedown', unlockAudio);
 
 // Patch punch button
 const punchBtn = document.getElementById('punchBtn');
-punchBtn.addEventListener('click', glottalStop);
-punchBtn.addEventListener('touchstart', (e) => { e.stopPropagation(); initAudio(); if(actx&&actx.state==='suspended')actx.resume(); glottalStop(); }, { passive: false });
+let lastPunchTouchAt = 0;
+function triggerPunch() {
+  vel += (Math.random() - 0.5) * 2.5;
+  void glottalStop();
+}
+
+punchBtn.addEventListener('click', () => {
+  if (Date.now() - lastPunchTouchAt < 500) return;
+  triggerPunch();
+});
+
+punchBtn.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  lastPunchTouchAt = Date.now();
+  primeAudioFromGesture();
+  triggerPunch();
+}, { passive: false });
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') {
+    dragging = false;
+    return;
+  }
+  if (audioStarted) primeAudioFromGesture();
+});
 
 function drawFrame(t) {
   const depthNorm = P.trillDepth / 100;
