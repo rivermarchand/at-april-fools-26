@@ -690,91 +690,93 @@ let targetGlottalGain = 0;
 let currentGlottalGain = 0;
 
 let _dbgAudioFrame = 0;
+let glottalStopActive = false; // true while glottalStop owns gain scheduling
+
+// Helper: set an AudioParam's value directly without accumulating automation events.
+// cancelScheduledValues first to clear any stale timeline entries, then assign .value.
+function setParam(param, val) {
+  param.cancelScheduledValues(0);
+  param.value = val;
+}
+
 function updateAudio(t) {
-  if (!audioStarted || !actx) { if(_dbgAudioFrame++ % 120 === 0) dbgMsg('updateAudio skip: started='+audioStarted+' actx='+(!!actx)); return; }
+  if (!audioStarted || !actx) return;
 
   // Voice is active when dragging or recently punched
   const shouldSound = dragging || Math.abs(vel) > 0.02;
-  if(_dbgAudioFrame++ % 60 === 0) dbgMsg(`audio: drag=${dragging} vel=${vel.toFixed(3)} gain=${currentGlottalGain.toFixed(3)} state=${actx.state} master=${masterGain?masterGain.gain.value.toFixed(3):'?'}`);
+  if(_dbgAudioFrame++ % 60 === 0) dbgMsg(`audio: drag=${dragging} vel=${vel.toFixed(3)} gain=${currentGlottalGain.toFixed(3)} state=${actx.state} gsActive=${glottalStopActive}`);
 
-  // Smooth gain envelope — on mobile, kick-start with an immediate bump
-  // so setTargetAtTime doesn't ramp from near-zero too slowly
+  // Smooth gain envelope
   targetGlottalGain = shouldSound ? 0.35 : 0;
   if (shouldSound && !prevDragging && currentGlottalGain < 0.01) {
-    currentGlottalGain = 0.15; // immediate audible kick
+    currentGlottalGain = 0.15;
     dbgMsg('gain kick-start to 0.15');
   }
   currentGlottalGain += (targetGlottalGain - currentGlottalGain) * 0.08;
   prevDragging = dragging;
 
-  const now = actx.currentTime;
-
-  // === PITCH: mapped from uvula length ===
-  // Longer uvula = lower pitch (range: ~60Hz to ~220Hz)
-  const lengthNorm = (P.length - 60) / (250 - 60); // 0..1
-  const basePitch = 220 - lengthNorm * 160; // 220Hz down to 60Hz
-
-  // Swing angle bends pitch (throat warping effect)
+  // === PITCH ===
+  const lengthNorm = (P.length - 60) / (250 - 60);
+  const basePitch = 220 - lengthNorm * 160;
   const pitchBend = Math.sin(angle) * 15;
   const finalPitch = basePitch + pitchBend;
 
-  glottalOsc.frequency.setTargetAtTime(finalPitch, now, 0.03);
-  subOsc.frequency.setTargetAtTime(finalPitch * 0.5, now, 0.03);
+  // Use .value for per-frame updates — no automation accumulation
+  if (!glottalStopActive) {
+    setParam(glottalOsc.frequency, finalPitch);
+    setParam(subOsc.frequency, finalPitch * 0.5);
 
-  // === GLOTTAL GAINS ===
-  glottalGain.gain.setTargetAtTime(currentGlottalGain, now, 0.02);
-  subGain.gain.setTargetAtTime(currentGlottalGain * 0.25, now, 0.02);
-  noiseGain.gain.setTargetAtTime(currentGlottalGain * 0.12, now, 0.02);
+    // === GLOTTAL GAINS ===
+    setParam(glottalGain.gain, currentGlottalGain);
+    setParam(subGain.gain, currentGlottalGain * 0.25);
+    setParam(noiseGain.gain, currentGlottalGain * 0.12);
 
-  // Breath noise scales with velocity (faster swing = more breath)
-  const breathAmt = Math.min(Math.abs(vel) * 2, 0.3) * currentGlottalGain;
-  breathGain.gain.setTargetAtTime(breathAmt, now, 0.02);
+    const breathAmt = Math.min(Math.abs(vel) * 2, 0.3) * currentGlottalGain;
+    setParam(breathGain.gain, breathAmt);
+
+    setParam(masterGain.gain, 0.6);
+  }
 
   // === STIFFNESS → harmonic richness ===
-  // Higher stiffness = more distortion = brighter harmonics
   const stiffNorm = P.stiffness / 100;
   waveshaper.curve = makeDistortionCurve(1 + stiffNorm * 8);
 
   // === WIDTH → formant vowel shape ===
-  const widthNorm = (P.width) / 100; // 0..1
-  const swingNorm = Math.sin(angle); // -1..1
+  const widthNorm = (P.width) / 100;
+  const swingNorm = Math.sin(angle);
 
-  // Vowel targets: [F1, F2, F3, F4, F5]
-  const vowelEe = [280, 2300, 3000, 3500, 4800]; // closed/front (narrow)
-  const vowelAh = [800, 1200, 2600, 3300, 4500]; // open (wide)
-  const vowelOo = [350, 800,  2500, 3100, 4200]; // rounded/back
+  const vowelEe = [280, 2300, 3000, 3500, 4800];
+  const vowelAh = [800, 1200, 2600, 3300, 4500];
+  const vowelOo = [350, 800,  2500, 3100, 4200];
 
-  formants.forEach((f, i) => {
-    // Width blends eee→ahhh, swing pushes toward ooo
-    const openness = widthNorm;
-    const roundness = (1 - widthNorm) * Math.max(0, -swingNorm);
+  if (!glottalStopActive) {
+    formants.forEach((f, i) => {
+      const openness = widthNorm;
+      const roundness = (1 - widthNorm) * Math.max(0, -swingNorm);
+      let targetFreq = vowelAh[i] * openness +
+                       vowelEe[i] * (1 - openness) * (1 - roundness) +
+                       vowelOo[i] * roundness;
+      targetFreq *= (1 + swingNorm * 0.1);
+      const qMult = 0.4 + (1 - widthNorm) * 1.2;
+      setParam(f.bp.frequency, targetFreq);
+      setParam(f.bp.Q, f.baseQ * qMult);
+    });
+  }
 
-    let targetFreq = vowelAh[i] * openness +
-                     vowelEe[i] * (1 - openness) * (1 - roundness) +
-                     vowelOo[i] * roundness;
+  // === NASALITY ===
+  const nasalNorm = P.nasality / 100;
+  const toneFreq = 1900 * Math.pow(6.3, nasalNorm);
+  setParam(toneFilter.frequency, toneFreq);
+  setParam(toneFilter.Q, 0.5 + Math.sin(nasalNorm * Math.PI) * 4);
 
-    targetFreq *= (1 + swingNorm * 0.1);
+  if (!glottalStopActive) {
+    setParam(nasalGain.gain, currentGlottalGain * Math.max(0, nasalNorm - 0.4) * 0.4);
+  }
+  setParam(nasalBP.frequency, 220 + nasalNorm * 120 + pitchBend * 0.5);
 
-    const qMult = 0.4 + (1 - widthNorm) * 1.2; // narrow = tighter resonance
-    f.bp.frequency.setTargetAtTime(targetFreq, now, 0.04);
-    f.bp.Q.setTargetAtTime(f.baseQ * qMult, now, 0.04);
-  });
-
-  // === NASALITY → tone filter (low-to-high frequency sweep) ===
-  const nasalNorm = P.nasality / 100; // 0=dark/muffled, 1=bright/nasal
-  // Sweep lowpass from ~1900Hz (muffled) to 12kHz (wide open)
-  const toneFreq = 1900 * Math.pow(6.3, nasalNorm); // exponential sweep
-  toneFilter.frequency.setTargetAtTime(toneFreq, now, 0.04);
-  // Slight resonance bump in the middle range for a nasal honk
-  toneFilter.Q.setTargetAtTime(0.5 + Math.sin(nasalNorm * Math.PI) * 4, now, 0.04);
-
-  // Nasal resonance path — fades in at higher nasality values
-  nasalGain.gain.setTargetAtTime(currentGlottalGain * Math.max(0, nasalNorm - 0.4) * 0.4, now, 0.03);
-  nasalBP.frequency.setTargetAtTime(220 + nasalNorm * 120 + pitchBend * 0.5, now, 0.05);
-
-  // === DAMPING → decay and brightness ===
+  // === DAMPING ===
   const dampNorm = P.damping / 100;
-  breathFilter.frequency.setTargetAtTime(1500 + (1 - dampNorm) * 3000, now, 0.05);
+  setParam(breathFilter.frequency, 1500 + (1 - dampNorm) * 3000);
 
   // Trill controls swing speed/amplitude in physics, no separate audio effect
 }
@@ -782,7 +784,8 @@ function updateAudio(t) {
 // Glottal stop (punch button) — violent impact that rings out
 function glottalStop() {
   if (!audioStarted || !actx) return;
-  initAudio(); // ensure audio is running even if this is first interaction
+  initAudio();
+  glottalStopActive = true;
   const now = actx.currentTime;
 
   // --- PHASE 1: Impact transient (0-30ms) ---
@@ -864,13 +867,9 @@ function glottalStop() {
   setTimeout(() => {
     if (!actx) return;
     const t2 = actx.currentTime;
-    // Let the normal updateAudio loop take back over smoothly
-    glottalGain.gain.setTargetAtTime(currentGlottalGain, t2, 0.1);
-    noiseGain.gain.setTargetAtTime(currentGlottalGain * 0.12, t2, 0.1);
-    breathGain.gain.setTargetAtTime(0, t2, 0.15);
-    subGain.gain.setTargetAtTime(currentGlottalGain * 0.25, t2, 0.1);
-    nasalGain.gain.setTargetAtTime(0, t2, 0.1);
-    masterGain.gain.setTargetAtTime(0.6, t2, 0.05);
+    // Hand control back to updateAudio loop
+    glottalStopActive = false;
+    dbgMsg('glottalStop recovery — handing back to updateAudio');
   }, 600);
 }
 
